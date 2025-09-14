@@ -1,1 +1,8 @@
-segment-anything
+torch
+torchvision
+opencv-python-headless
+numpy
+streamlit
+pillow
+matplotlib
+segment-anything 
