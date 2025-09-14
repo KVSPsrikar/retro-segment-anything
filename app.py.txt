@@ -1,0 +1,228 @@
+import streamlit as st
+import numpy as np
+import cv2
+from PIL import Image
+import torch
+import os
+import io
+from segment_anything import sam_model_registry, SamPredictor
+
+# Load SAM model
+@st.cache_resource
+def load_model():
+    try:
+        # Update this path to your model location
+        sam_checkpoint = r"C:\Users\HP\checkpoints\sam_vit_b_01ec64.pth"
+        model_type = "vit_b"
+        
+        if not os.path.exists(sam_checkpoint):
+            st.error(f"Model file not found at: {sam_checkpoint}")
+            st.stop()
+            
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+        sam.to(device=device)
+        predictor = SamPredictor(sam)
+        return predictor
+    except Exception as e:
+        st.error(f"Error loading model: {str(e)}")
+        st.stop()
+
+# Initialize the model
+predictor = load_model()
+
+# Set page config
+st.set_page_config(
+    page_title="Segment Anything",
+    page_icon="🎯",
+    layout="wide"
+)
+
+# Add custom CSS
+st.markdown("""
+    <style>
+    .main {
+        max-width: 1200px;
+        padding: 2rem;
+    }
+    .stButton>button {
+        background-color: #4a6fa5;
+        color: white;
+        border: none;
+        padding: 0.5rem 1rem;
+        border-radius: 4px;
+    }
+    .stButton>button:hover {
+        background-color: #3a5a80;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# Initialize session state
+if 'image' not in st.session_state:
+    st.session_state.image = None
+if 'mask' not in st.session_state:
+    st.session_state.mask = None
+if 'points' not in st.session_state:
+    st.session_state.points = []
+if 'labels' not in st.session_state:
+    st.session_state.labels = []
+
+# Sidebar
+st.sidebar.title("Segment Anything")
+st.sidebar.markdown("### Model Settings")
+model_type = st.sidebar.selectbox(
+    "Model Type",
+    ["Base (vit_b)", "Large (vit_l)", "Huge (vit_h)"],
+    index=0
+)
+
+# Add sample images
+st.sidebar.markdown("### Sample Images")
+sample_images = {
+    "Dog": "notebooks/images/dog.jpg",
+    "Truck": "notebooks/images/truck.jpg",
+    "Groceries": "notebooks/images/groceries.jpg"
+}
+
+selected_sample = st.sidebar.selectbox("Load Sample", list(sample_images.keys()))
+if st.sidebar.button("Load Selected Sample"):
+    try:
+        image_path = sample_images[selected_sample]
+        if not os.path.exists(image_path):
+            st.sidebar.error(f"Sample image not found at: {image_path}")
+        else:
+            st.session_state.image = cv2.cvtColor(
+                cv2.imread(image_path),
+                cv2.COLOR_BGR2RGB
+            )
+            st.session_state.mask = None
+            st.session_state.points = []
+            st.session_state.labels = []
+            st.experimental_rerun()
+    except Exception as e:
+        st.sidebar.error(f"Error loading sample image: {str(e)}")
+
+# File uploader
+uploaded_file = st.sidebar.file_uploader("Or upload your own image", type=["jpg", "jpeg", "png"])
+if uploaded_file is not None:
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    st.session_state.image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    st.session_state.image = cv2.cvtColor(st.session_state.image, cv2.COLOR_BGR2RGB)
+    st.session_state.mask = None
+    st.session_state.points = []
+    st.session_state.labels = []
+
+# Main content
+st.title("Segment Anything")
+st.markdown("Click on the image to add foreground points (left-click) or background points (right-click)")
+
+if st.session_state.image is not None:
+    # Display the image
+    st.image(st.session_state.image, use_column_width=True, caption="Click to add points")
+    
+    # Add click handler
+    if st.button("Clear Points"):
+        st.session_state.points = []
+        st.session_state.labels = []
+        st.session_state.mask = None
+        st.experimental_rerun()
+    
+    # Handle clicks on the image
+    if st.session_state.points:
+        # Convert points to numpy arrays
+        input_points = np.array(st.session_state.points)
+        input_labels = np.array(st.session_state.labels)
+        
+        # Run SAM
+        predictor.set_image(st.session_state.image)
+        masks, scores, _ = predictor.predict(
+            point_coords=input_points,
+            point_labels=input_labels,
+            multimask_output=True,
+        )
+        
+        # Get the best mask
+        st.session_state.mask = masks[0]
+        
+        # Display the mask
+        st.image(st.session_state.mask, use_column_width=True, caption="Segmentation Mask")
+    
+    # Add download button if mask exists
+    if st.session_state.mask is not None:
+        # Convert mask to image
+        mask_image = Image.fromarray((st.session_state.mask * 255).astype(np.uint8))
+        # Save to bytes
+        img_byte_arr = io.BytesIO()
+        mask_image.save(img_byte_arr, format='PNG')
+        img_byte_arr = img_byte_arr.getvalue()
+        # Create download button
+        st.download_button(
+            label="Download Mask",
+            data=img_byte_arr,
+            file_name="mask.png",
+            mime="image/png"
+        )
+
+# Add footer
+st.markdown("---")
+st.markdown("""
+    <div style="text-align: center; color: #666; font-size: 0.9em; margin-top: 30px;">
+        <p>© 2025 Segment Anything Web App | Built with Meta's Segment Anything Model</p>
+    </div>
+""", unsafe_allow_html=True)
+
+# Add JavaScript for click handling
+st.components.v1.html("""
+<script>
+const doc = window.parent.document;
+const images = doc.querySelectorAll('.stImage img');
+if (images.length > 0) {
+    const img = images[0];
+    img.style.cursor = 'crosshair';
+    img.onclick = function(e) {
+        const rect = this.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const label = e.which === 1 ? 1 : 0; // 1 for left click, 0 for right click
+        const data = {
+            x: x / rect.width,
+            y: y / rect.height,
+            label: label
+        };
+        const jsonData = JSON.stringify(data);
+        const bytes = new TextEncoder().encode(jsonData);
+        const blob = new Blob([bytes], {type: 'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'click.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    };
+    img.oncontextmenu = function(e) {
+        e.preventDefault();
+        return false;
+    };
+}
+</script>
+""", height=0)
+
+# Handle click data
+try:
+    if os.path.exists('click.json'):
+        with open('click.json', 'r') as f:
+            import json
+            data = json.load(f)
+            if st.session_state.image is not None:
+                h, w = st.session_state.image.shape[:2]
+                x = int(data['x'] * w)
+                y = int(data['y'] * h)
+                st.session_state.points.append([x, y])
+                st.session_state.labels.append(data['label'])
+                os.remove('click.json')
+                st.experimental_rerun()
+except Exception as e:
+    st.error(f"Error handling click: {str(e)}")
